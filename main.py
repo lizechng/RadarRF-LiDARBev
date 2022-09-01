@@ -250,6 +250,21 @@ def pointcloud_transform(pointcloud, transform_matrix):
 
 
 def pts2rbev(lpts):
+
+    # Remove LiDAR ground points
+    from ransac import my_ransac_v3
+    indices, model = my_ransac_v3(lpts[:, :3], distance_threshold=0.7)
+    lpts = np.delete(lpts, indices, axis=0)
+    # print(l.shape)
+    # ptsview(d)
+    # raise NotImplemented
+    # from ground_removal import Processor
+    # process = Processor(n_segments=140, n_bins=180, line_search_angle=0.3, max_dist_to_line=2.15,
+    #                     sensor_height=2.53, max_start_height=-2.5, long_threshold=8)
+    # vel_non_ground = process(lpts)
+    # ptsview(vel_non_ground)
+    #
+    # raise NotImplemented
     # LiDAR points to radar coordinate
     VelodyneLidar_to_LeopardCamera1_TransformMatrix = np.array(
         [
@@ -288,7 +303,7 @@ def pts2rbev(lpts):
 
     side_range = (-75, 75)
     fwd_range = (0, 75)
-    height_range = (-4, 5)  # height_range should be modified manually
+    height_range = (-30, 50)  # height_range should be modified manually
     y, x, z = pts[:, 0], pts[:, 1], pts[:, 2]
     # print(np.min(x), np.max(x)) # -199.20, 197.77
     # print(np.min(y), np.max(y)) # -185.53, 196.74
@@ -321,7 +336,7 @@ def pts2rbev(lpts):
     im = np.zeros([y_max, x_max], dtype=np.uint8)
     im[y_img, x_img] = pixel_value
     # im = (im - np.min(im)) / (np.max(im) - np.min(im)) * 255
-    print(im.shape)
+    # print(im.shape)
     # plt.imshow(im, cmap='jet')
     # plt.show()
     return im[:, ::-1]
@@ -443,8 +458,8 @@ def pltRadLid(radar, lidar):
     heatmap = np.float32(heatmap)
 
     cam = 0.2 * heatmap + 0.8 * np.float32(radar)
-    Image.fromarray(np.uint8(cam)).show()
-
+    # Image.fromarray(np.uint8(cam)).show()
+    return cam
 
 if __name__ == '__main__':
     base_path = './Dataset'
@@ -487,14 +502,17 @@ if __name__ == '__main__':
             lid_im = pts2rbev(read_pcd(pcd_lidar))
 
             # image visualization
-            Image.fromarray(np.uint8(lid_im)).show()
-            Image.fromarray(np.uint8(lid_im)).save('rBev.png')
+            # Image.fromarray(np.uint8(lid_im)).show()
+            # Image.fromarray(np.uint8(lid_im)).save('rBev.png')
             cm = plt.get_cmap('jet')
             colored_image = cm(cart_im)
-            Image.fromarray((colored_image[:, :, :3] * 255).astype(np.uint8)).show()
-            Image.fromarray((colored_image[:, :, :3] * 255).astype(np.uint8)).save('Radar.png')
+            # Image.fromarray((colored_image[:, :, :3] * 255).astype(np.uint8)).show()
+            # Image.fromarray((colored_image[:, :, :3] * 255).astype(np.uint8)).save('Radar.png')
 
             # alignment between 'lidar Bev' and 'radar RF'
-            pltRadLid((colored_image[:, :, :3] * 255).astype(np.uint8), lid_im)
-            break
+            cam = pltRadLid((colored_image[:, :, :3] * 255).astype(np.uint8), lid_im)
+            cam = cv2.cvtColor(cam, cv2.COLOR_BGR2RGB)
+            cv2.imshow('', np.uint8(cam))
+            cv2.waitKey(0)
+            cv2.destroyAllWindows()
         break
