@@ -134,7 +134,7 @@ class Dataset_loader(Dataset):
                                                                                   img_lidar,
                                                                                   img_mask,
                                                                                   img)
-        tensor_radar = self.totensor(img_radar_np).float().unsqueeze(0) # 1, C, H, W
+        tensor_radar = self.totensor(img_radar_np).float() # 1, C, H, W
         tensor_lidar = self.totensor(img_lidar_np).float() # .unsqueeze(0) # 1, C, H, W
         tensor_mask = self.totensor(img_mask_np).float() # .unsqueeze(0) # 1, C, H, W
         tensor_img = self.totensor(img_pil).float().unsqueeze(0) # 1, C, H, W  # in transform.ToTensor(), img.div(255)

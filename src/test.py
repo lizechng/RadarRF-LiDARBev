@@ -8,7 +8,7 @@ import torch
 from time import time
 from tensorboardX import SummaryWriter
 import numpy as np
-import os
+import cv2
 from PIL import Image
 from .models import compile_model
 from .data import compile_data
@@ -81,28 +81,33 @@ def model_test(gpuid=1,
     model = compile_model(grid_conf, data_aug_conf, outC=1)
     model.to(device)
 
-    model = compile_model(grid_conf, data_aug_conf, outC=1)
     print('loading')
-    model.load_state_dict(torch.load('./runs/model-3000.pt'))
+    model.load_state_dict(torch.load('./radar/model-600.pt'))
     model.to(device)
 
     model.eval()
-    for batchi, (imgs, radars, lidars, masks) in enumerate(validloader):
+    for batchi, (imgs, radars, lidars, masks) in enumerate(trainloader):
         preds = model(imgs.to(device),
                       radars.to(device)
                       )
         lidars = lidars.to(device)
         masks = masks.to(device)
-
-        p = preds[0, 0, :, :].detach().cpu().numpy()
+        print(torch.max(preds), torch.min(preds))
+        p = preds[0, 0, :, :].detach().sigmoid().cpu().numpy()
         m = masks[0, 0, :, :].detach().cpu().numpy()
+        t = lidars[0, 0, :, :].detach().cpu().numpy()
         p = p * m
+        t = t * m
         print(p.shape)
-        for i in range(p.shape[0]):
-            for j in range(p.shape[1]):
-                if p[i, j] > 0.5:
-                    p[i, j] = 1
-                else:
-                    p[i, j] = 0
-        Image.fromarray(np.uint8(p * 255).T[::-1, :]).save(f'results/val/{batchi}.png')
-        # raise NotImplemented
+        # for i in range(p.shape[0]):
+        #     for j in range(p.shape[1]):
+        #         if p[i, j] > 0.5:
+        #             p[i, j] = 1
+        #         else:
+        #             p[i, j] = 0
+        p1 = np.uint8((1 - p) * 255).T[::-1, :]
+        t1 = np.uint8((1 - t) * 255).T[::-1, :]
+        im = np.vstack([p1, t1])
+        Image.fromarray(im).save(f'results/train-radar/{batchi}.png')
+        # Image.fromarray(im).show()
+        # break

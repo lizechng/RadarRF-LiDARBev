@@ -17,13 +17,26 @@ from .tools import SimpleLoss, get_batch_iou, get_val_info
 from .dataloader import get_loader
 from .radar_loader import radar_preprocessing
 
+class CrossEntropyLoss2d(torch.nn.Module):
+    def __init__(self, weight=None):
+        super(CrossEntropyLoss2d, self).__init__()
+        self.loss = torch.nn.NLLLoss2d(weight)
+    def forward(self, outputs, targets, mask):
+        t = targets * mask
+        return self.loss(torch.nn.functional.log_softmax(outputs*mask, dim=1), t[:, 0].long())
 
-def train(version,
-          dataroot='dataset',
-          nepochs=10000,
-          gpuid=1,
+class BCELoss(torch.nn.Module):
+    def __init__(self):
+        super(BCELoss, self).__init__()
+        self.loss_fn = torch.nn.BCELoss()
 
-          H=600, W=1200,
+    def forward(self, ypred, ytgt, mask):
+        loss = self.loss_fn(ypred.sigmoid() * mask, ytgt * mask)
+        return loss
+
+def train(gpuid=1,
+
+          H=512, W=1024,
           resize_lim=(0.193, 0.225),
           final_dim=(512, 1024),
           bot_pct_lim=(0.0, 0.22),
@@ -39,7 +52,7 @@ def train(version,
           zbound=[-10.0, 10.0, 20.0],
           dbound=[4.0, 75.0, 1.0],
 
-          bsz=1,
+          bsz=2,
           nworkers=10,
           lr=1e-3,
           weight_decay=1e-7,
@@ -70,9 +83,9 @@ def train(version,
         'data_path': '/media/personal_data/lizc/2/lift-splat-shoot/dataset',
         'rotate': False,
         'flip': None,  # if 'hflip', the inverse-projection will ?
-        'batch_size': 4,
+        'batch_size': bsz,
         'nworkers': 4,
-        'val_batch_size': 4,
+        'val_batch_size': bsz,
         'nworkers_val': 4,
 
     }
@@ -92,14 +105,16 @@ def train(version,
 
     opt = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    loss_fn = SimpleLoss(pos_weight).cuda(gpuid)
+    # loss_fn = SimpleLoss(pos_weight).cuda(gpuid)
+    # loss_fn = CrossEntropyLoss2d().cuda(gpuid)
+    loss_fn = BCELoss().cuda(gpuid)
 
     writer = SummaryWriter(logdir=logdir)
-    val_step = 1000 if version == 'mini' else 10000
+    val_step = 1000
 
     model.train()
     counter = 0
-    for epoch in range(10000):
+    for epoch in range(620):
         np.random.seed()
         for batchi, (imgs, radars, lidars, masks) in enumerate(trainloader):
             t0 = time()
@@ -138,7 +153,7 @@ def train(version,
             #     print('saving', mname)
             #     torch.save(model.state_dict(), mname)
             #     model.train()
-        if epoch % 1000 == 0:
+        if epoch % 100 == 0:
             model.eval()
             mname = os.path.join(logdir, "model-{}.pt".format(epoch))
             print('saving', mname)

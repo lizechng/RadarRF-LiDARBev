@@ -50,11 +50,11 @@ class CamEncode(nn.Module):
         return x.softmax(dim=1)
 
     def get_depth_feat(self, x):
-        x = self.get_eff_depth(x)
+        x = self.get_eff_depth(x)  # 4, 3, 512, 1024 -> 4, 512, 32, 64
         # Depth
-        x = self.depthnet(x)
-
-        depth = self.get_depth_dist(x[:, :self.D])
+        x = self.depthnet(x)  # 4, 135, 32, 64
+        depth = self.get_depth_dist(x[:, :self.D])  # 4, 71, 32, 64
+        # 4, 1, 71, 32, 64 * 4, 64, 1, 32, 64 -> 4, 64, 71, 32, 64
         new_x = depth.unsqueeze(1) * x[:, self.D:(self.D + self.C)].unsqueeze(2)
 
         return depth, new_x
@@ -64,7 +64,7 @@ class CamEncode(nn.Module):
         endpoints = dict()
         # Stem
         x = self.trunk._swish(self.trunk._bn0(self.trunk._conv_stem(x)))
-        prev_x = x # shape: 4, 32, 300, 600
+        prev_x = x  # shape: 4, 32, 300, 600
         # Blocks
         for idx, block in enumerate(self.trunk._blocks):
             drop_connect_rate = self.trunk._global_params.drop_connect_rate
@@ -101,7 +101,47 @@ class BevEncode(nn.Module):
         self.layer3 = trunk.layer3
 
         # self.up1 = Up(64 + 256, 256, scale_factor=4)
-        self.up1 = Up(64 + 256, 256, scale_factor=(4, 150/38))
+        self.up1 = Up(64 + 256, 256, scale_factor=(4, 150 / 38))
+        self.up2 = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode='bilinear',
+                        align_corners=True),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, outC, kernel_size=1, padding=0),
+        )
+
+    def forward(self, x):
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+
+        x1 = self.layer1(x)
+        x = self.layer2(x1)
+        x = self.layer3(x)
+
+        x = self.up1(x, x1)
+        x = self.up2(x)
+
+        return x
+
+
+class RadarEncode(nn.Module):
+    def __init__(self, inC, outC):
+        super(RadarEncode, self).__init__()
+
+        trunk = resnet18(pretrained=False, zero_init_residual=True)
+        self.conv1 = nn.Conv2d(inC, 64, kernel_size=7, stride=2, padding=3,
+                               bias=False)
+        self.bn1 = trunk.bn1
+        self.relu = trunk.relu
+
+        self.layer1 = trunk.layer1
+        self.layer2 = trunk.layer2
+        self.layer3 = trunk.layer3
+
+        # self.up1 = Up(64 + 256, 256, scale_factor=4)
+        self.up1 = Up(64 + 256, 256, scale_factor=(4, 150 / 38))
         self.up2 = nn.Sequential(
             nn.Upsample(scale_factor=2, mode='bilinear',
                         align_corners=True),
@@ -145,8 +185,8 @@ class LiftSplatShoot(nn.Module):
         self.frustum = self.create_frustum()
         self.D, _, _, _ = self.frustum.shape
         self.camencode = CamEncode(self.D, self.camC, self.downsample)
-        self.bevencode = BevEncode(inC=self.camC, outC=outC)
-
+        self.bevencode = BevEncode(inC=self.camC + 1, outC=outC)
+        self.radencode = RadarEncode(inC=1, outC=3)
         # toggle using QuickCumsum vs. autograd
         self.use_quickcumsum = True
 
@@ -205,7 +245,7 @@ class LiftSplatShoot(nn.Module):
         B, N, C, imH, imW = x.shape
 
         x = x.view(B * N, C, imH, imW)
-        x = self.camencode(x) # shape: 512/16 1024/16
+        x = self.camencode(x)  # shape: 512/16 1024/16
         # print(x.shape) # 4 64, 71, 32, 64
         x = x.view(B, N, self.camC, self.D, imH // self.downsample, imW // self.downsample)
         x = x.permute(0, 1, 3, 4, 5, 2)  # camera features: batch, ncams, 41, 8, 22, 64
@@ -252,11 +292,6 @@ class LiftSplatShoot(nn.Module):
                 + geom_feats[:, 3]
         sorts = ranks.argsort()  # from small to big
         x, geom_feats, ranks = x[sorts], geom_feats[sorts], ranks[sorts]
-        # print(geom_feats.shape, x.shape) # shape: 7216, 4
-        # print(geom_feats[:5, :])
-        # print(ranks[:5])
-        # for example, the geom_feats[:5, :] are all [111, 95, 0, 0]
-        # with cumsum trick, the geom_feats[:5, :] are [111, 95, 0, 0] etc, from 95 to 99
         # cumsum trick
         # camera points decrease rapidly
         if not self.use_quickcumsum:
@@ -282,10 +317,65 @@ class LiftSplatShoot(nn.Module):
 
         return x
 
-    def forward(self, x, radars):
-        x = self.get_voxels(x)
+    def taylor(self, hm, rinf):
+        mask = rinf[:, 0:1]
+        peak = rinf[:, 1:3].unsqueeze(-1).permute(0, 4, 2, 3, 1)
+        hm = hm * mask
+        B, C, hm_h, hm_w = hm.shape
 
+        px = torch.linspace(2, hm_w - 3, hm_w - 4, dtype=torch.long).view(1, hm_w - 4).expand(hm_h - 4, hm_w - 4)
+        py = torch.linspace(2, hm_h - 3, hm_h - 4, dtype=torch.long).view(hm_h - 4, 1).expand(hm_h - 4, hm_w - 4)
+
+        coord = torch.stack((
+            torch.linspace(0, hm_w - 1, hm_w, dtype=torch.long).view(1, hm_w).expand(hm_h, hm_w),
+            torch.linspace(0, hm_h - 1, hm_h, dtype=torch.long).view(hm_h, 1).expand(hm_h, hm_w)
+        ), -1).unsqueeze(0).unsqueeze(0).repeat(B, C, 1, 1, 1).to(hm.device)
+
+        dx = 0.5 * (hm[:, :, py, px + 1] - hm[:, :, py, px - 1])
+        dy = 0.5 * (hm[:, :, py + 1, px] - hm[:, :, py - 1, px])
+        dxx = 0.25 * (hm[:, :, py, px + 2] - 2 * hm[:, :, py, px] + hm[:, :, py, px - 2])
+        dxy = 0.25 * (hm[:, :, py + 1, px + 1] - hm[:, :, py - 1, px + 1] - hm[:, :, py + 1, px - 1] \
+                      + hm[:, :, py - 1, px - 1])
+        dyy = 0.25 * (hm[:, :, py + 2 * 1, px] - 2 * hm[:, :, py, px] + hm[:, :, py - 2 * 1, px])
+
+        derivative = torch.stack([dx, dy], -1).view(B, C, hm_h - 4, hm_w - 4, 2, 1)
+        h1 = torch.stack([dxx, dxy], -1).view(B, C, hm_h - 4, hm_w - 4, 2, 1)
+        h2 = torch.stack([dxy, dyy], -1).view(B, C, hm_h - 4, hm_w - 4, 2, 1)
+        hessian = torch.cat([h1, h2], -1)
+        # the inversion could not be completed because the matrix is singular
+        # each pixel or max-pixel
+        # if hessian.det() != 0:
+        det = dxx * dyy - dxy * dxy
+        cond = det.view(B, C, hm_h - 4, hm_w - 4, 1, 1).repeat(1, 1, 1, 1, 2, 2)
+        diagm = torch.eye(2, 2).view(1, 1, 1, 1, 2, 2).repeat(B, C, hm_h - 4, hm_w - 4, 1, 1).to(det.device)
+        hessian = torch.where(cond != 0, hessian, diagm)
+        hessianinv = hessian.inverse()
+        oft = (-hessianinv).matmul(derivative).squeeze(-1)
+        # coord + offset | maxval + offset
+        oft = torch.nn.functional.pad(oft, (0, 0, 2, 2, 2, 2), value=0)
+        cnd = torch.nn.functional.pad(cond[..., 0], (0, 0, 2, 2, 2, 2), value=0)
+        crd = (coord + peak - oft)
+        # singular matrix means the pixel is far from peak value
+        # the coord of pixels (hessian matrix is sigular) is w/o rectification
+        coord = torch.where(cnd == 0, coord.long(), crd.long())
+        coord = coord.view(-1, 2)
+        hm = hm.view(-1)
+        # Check whether the coordinates match the values
+        kept = (coord[:, 0] >= 0) & (coord[:, 0] < hm_h) \
+               & (coord[:, 1] >= 0) & (coord[:, 1] < hm_w)
+        coord = coord[kept]
+        hm = hm[kept]
+        f = torch.zeros((B, C, hm_h, hm_w), device=hm.device)
+        f[:, :, coord[:, 0], coord[:, 1]] = hm
+        return f
+
+    def forward(self, x, radars):
+        cout = self.get_voxels(x)
+        rinf = self.radencode(radars)
+        rout = self.taylor(radars, rinf)
+        x = torch.cat([cout, rout], 1)
         x = self.bevencode(x)
+
         return x
 
 
